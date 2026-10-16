@@ -32,12 +32,12 @@ on:
       BUILD_TARGET:
         description: 'Specify your Build Target' 
         required: true
-        default: 'vendor_boot'
+        default: 'vendorboot'
         type: choice
         options:
         - boot
         - recovery
-        - vendor_boot
+        - vendorboot
       LDCHECK:
         description: 'Path of blobs to check' 
         required: true
@@ -74,7 +74,7 @@ jobs:
         echo "Device Branch: ${{ github.event.inputs.DEVICE_TREE_BRANCH }}"
         echo "Device Path: ${{ github.event.inputs.DEVICE_PATH }}"
         echo "Device Name: ${{ github.event.inputs.DEVICE_NAME }}"
-        echo "Build Target: ${{ github.event.inputs.BUILD_TARGET }}image"
+        echo "Build Target: ${{ github.event.inputs.BUILD_TARGET }}"
         echo "Include Recovery Installer: ${{ github.event.inputs.RECOVERY_INSTALLER }}"
         echo "Release recovery.tar For Samsung devices: ${{ github.event.inputs.RECOVERY_TAR }}"
         echo "::endgroup::"
@@ -179,16 +179,9 @@ jobs:
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
         lunch ${{ env.DEVICE_MAKEFILE }}-eng
-        
-        if [ "${{ github.event.inputs.BUILD_TARGET }}" = "vendor_boot" ]; then
-          BUILD_TARGET_NAME="vendor_bootimage"
-        else
-          BUILD_TARGET_NAME="${{ github.event.inputs.BUILD_TARGET }}image"
-        fi
-        
         make clean
-        make ${BUILD_TARGET_NAME} -j$(nproc --all)
-        echo "Done building ${BUILD_TARGET_NAME}"
+        make vendorbootimage -j$(nproc --all)
+        echo "Done building vendorbootimage"
       
     - name: Set Build Date
       run: |
