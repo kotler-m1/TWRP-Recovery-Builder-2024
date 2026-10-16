@@ -32,12 +32,12 @@ on:
       BUILD_TARGET:
         description: 'Specify your Build Target' 
         required: true
-        default: 'recovery'
+        default: 'vendor_boot'
         type: choice
         options:
         - boot
         - recovery
-        - vendorboot
+        - vendor_boot
       LDCHECK:
         description: 'Path of blobs to check' 
         required: true
@@ -147,9 +147,27 @@ jobs:
             echo "No recovery makefile file found!"
         fi
       continue-on-error: true
-      
+
+    - name: Verify Device Tree Content
+      run: |
+        cd workspace
+        echo "=== BoardConfig prebuilt line ==="
+        grep -n 'BOARD_PREBUILT_VENDOR_RAMDISK' ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk || echo "MISSING"
+        echo ""
+        echo "=== BoardConfig module lists (must be empty) ==="
+        grep -n 'BOARD_VENDOR_RAMDISK_KERNEL_MODULES' ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk
+        echo ""
+        echo "=== prebuilt directory ==="
+        ls -la ${{ github.event.inputs.DEVICE_PATH }}/prebuilt/
+        echo ""
+        echo "=== stock_ramdisk file ==="
+        file ${{ github.event.inputs.DEVICE_PATH }}/prebuilt/stock_ramdisk.cpio.lz4 || echo "MISSING"
+        echo ""
+        echo "=== modules.load count ==="
+        wc -l ${{ github.event.inputs.DEVICE_PATH }}/prebuilt/modules/vendor_boot/modules.load
+
     - name: Install Python 2
-      if: github.event.inputs.MANIFEST_BRANCH != 'twrp-11' && github.event.inputs.MANIFEST_BRANCH != 'twrp-12.1'  && github.event.inputs.MANIFEST_BRANCH != 'twrp-14'
+      if: github.event.inputs.MANIFEST_BRANCH != 'twrp-11' && github.event.inputs.MANIFEST_BRANCH != 'twrp-12.1' && github.event.inputs.MANIFEST_BRANCH != 'twrp-14.1'
       run: |
         sudo apt -y install python2
         cd /usr/bin
@@ -160,10 +178,19 @@ jobs:
         cd workspace
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
-        lunch ${{ env.DEVICE_MAKEFILE }}-eng && make clean && make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
-        echo "Done building your ${{ github.event.inputs.BUILD_TARGET }}.img"
+        lunch ${{ env.DEVICE_MAKEFILE }}-eng
+        
+        if [ "${{ github.event.inputs.BUILD_TARGET }}" = "vendor_boot" ]; then
+          BUILD_TARGET_NAME="vendor_bootimage"
+        else
+          BUILD_TARGET_NAME="${{ github.event.inputs.BUILD_TARGET }}image"
+        fi
+        
+        make clean
+        make ${BUILD_TARGET_NAME} -j$(nproc --all)
+        echo "Done building ${BUILD_TARGET_NAME}"
       
-    - name: Set Build Date # Output will be use in Release
+    - name: Set Build Date
       run: |
         echo "BUILD_DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
         DEVICE_TREE_URL="${{ github.event.inputs.DEVICE_TREE }}"
