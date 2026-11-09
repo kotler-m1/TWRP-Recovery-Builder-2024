@@ -1,4 +1,4 @@
-name: TWRP Recovery Builder Patch-1
+name: TWRP Recovery Builder 2024
 
 on:
   workflow_dispatch:
@@ -169,16 +169,9 @@ jobs:
         cd workspace
         repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
 
-    # ---------------------------------------------------------------
+   
     # Install custom core Makefile (full replacement).
-    # Controls:
-    #   PATCH_CORE_MAKEFILE=true  -> download CUSTOM_MAKEFILE_URL and
-    #                                replace workspace/build/make/core/Makefile
-    #   PATCH_CORE_MAKEFILE=false -> leave stock twrp-14.1 Makefile untouched
-    # Fails the job if the URL is unreachable, returns empty/HTML, or the
-    # downloaded file doesn't look like a core Makefile. Never modifies any
-    # other build file.
-    # ---------------------------------------------------------------
+    
     - name: Install Custom Core Makefile
       if: github.event.inputs.PATCH_CORE_MAKEFILE == 'true'
       run: |
@@ -209,7 +202,6 @@ jobs:
           exit 1
         fi
 
-        # Show what changed vs. the synced stock file (for the log)
         echo "---- diff summary vs stock core/Makefile ----"
         diff -u "$MF" /tmp/custom_Makefile | head -40 || true
         echo "---------------------------------------------"
@@ -244,39 +236,6 @@ jobs:
         else
             echo "::error::No recovery makefile (twrp_<codename>.mk / omni_<codename>.mk) in ${{ github.event.inputs.DEVICE_PATH }}"
             exit 1
-        fi
-
-    - name: Verify Prebuilt Vendor Ramdisk
-      if: github.event.inputs.BUILD_TARGET == 'vendorboot'
-      run: |
-        cd workspace/${{ github.event.inputs.DEVICE_PATH }}
-        if ! grep -q 'BOARD_PREBUILT_VENDOR_RAMDISK' BoardConfig.mk; then
-          echo "::warning::BOARD_PREBUILT_VENDOR_RAMDISK not found in BoardConfig.mk."
-          echo "If you are relying on a different ramdisk injection mechanism, ignore this."
-          exit 0
-        fi
-
-        RB=$(grep 'BOARD_PREBUILT_VENDOR_RAMDISK' BoardConfig.mk | head -1 \
-             | sed 's/.*:= *//' \
-             | sed "s|\$(DEVICE_PATH)|${{ github.event.inputs.DEVICE_PATH }}|")
-        echo "Referenced prebuilt: $RB"
-
-        FOUND=""
-        for P in "$RB" "../$RB" "../../$RB" "$GITHUB_WORKSPACE/workspace/$RB"; do
-          if [ -f "$P" ]; then FOUND="$P"; break; fi
-        done
-        if [ -z "$FOUND" ]; then
-          echo "::error::Prebuilt vendor ramdisk not found at $RB"
-          echo "Extract vendor_ramdisk00 from a known-working stock vendor_boot.img and commit it to the device tree."
-          exit 1
-        fi
-
-        SIZE=$(stat -c%s "$FOUND")
-        echo "Prebuilt ramdisk: $FOUND ($SIZE bytes)"
-        if [ "$SIZE" -lt 20000000 ]; then
-          echo "::error::Prebuilt ramdisk is only $SIZE bytes (<20MB)."
-          echo "The stock vendor_ramdisk00 is typically 60-70MB — you've likely pointed at the wrong file."
-          exit 1
         fi
 
     - name: Install Python 2
