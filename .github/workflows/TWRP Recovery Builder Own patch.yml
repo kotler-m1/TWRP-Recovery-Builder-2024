@@ -53,23 +53,14 @@ on:
         required: true
         default: true
       PATCH_CORE_MAKEFILE:
-        description: 'Patch build/make/core/Makefile (set false to leave it untouched)'
+        description: 'Replace build/make/core/Makefile with the custom version from kotler-m1 (set false to keep stock)'
         required: true
         default: true
         type: boolean
-      MAKEFILE_PATCH_MODE:
-        description: 'Makefile patch mode: auto=insert if missing, custom=apply your .patch, skip=do not touch'
-        required: true
-        default: 'auto'
-        type: choice
-        options:
-        - auto
-        - custom
-        - skip
-      CUSTOM_MAKEFILE_PATCH_PATH:
-        description: 'Only for mode=custom. Path in workflow repo, path in device tree, or https:// URL to a .patch file'
+      CUSTOM_MAKEFILE_URL:
+        description: 'Raw URL of the custom core Makefile to install (used when PATCH_CORE_MAKEFILE is true)'
         required: false
-        default: ''
+        default: 'https://raw.githubusercontent.com/kotler-m1/android_device_lava_LXX521-recovery/PE-14/Makefile'
 
 jobs:
   build:
@@ -97,9 +88,9 @@ jobs:
             fail=1
           fi
         done
-        if [ "${{ github.event.inputs.MAKEFILE_PATCH_MODE }}" = "custom" ] && \
-           [ -z "${{ github.event.inputs.CUSTOM_MAKEFILE_PATCH_PATH }}" ]; then
-          echo "::error::MAKEFILE_PATCH_MODE=custom requires CUSTOM_MAKEFILE_PATCH_PATH."
+        if [ "${{ github.event.inputs.PATCH_CORE_MAKEFILE }}" = "true" ] && \
+           [ -z "${{ github.event.inputs.CUSTOM_MAKEFILE_URL }}" ]; then
+          echo "::error::PATCH_CORE_MAKEFILE=true requires CUSTOM_MAKEFILE_URL."
           fail=1
         fi
         [ "$fail" -eq 0 ] || exit 1
@@ -115,9 +106,8 @@ jobs:
         echo "Build Target: ${{ github.event.inputs.BUILD_TARGET }}image"
         echo "Include Recovery Installer: ${{ github.event.inputs.RECOVERY_INSTALLER }}"
         echo "Release recovery.tar For Samsung devices: ${{ github.event.inputs.RECOVERY_TAR }}"
-        echo "Patch Core Makefile: ${{ github.event.inputs.PATCH_CORE_MAKEFILE }}"
-        echo "Makefile Patch Mode: ${{ github.event.inputs.MAKEFILE_PATCH_MODE }}"
-        echo "Custom Patch Path: ${{ github.event.inputs.CUSTOM_MAKEFILE_PATCH_PATH }}"
+        echo "Replace Core Makefile: ${{ github.event.inputs.PATCH_CORE_MAKEFILE }}"
+        echo "Custom Makefile URL: ${{ github.event.inputs.CUSTOM_MAKEFILE_URL }}"
         echo "::endgroup::"
 
     - name: Check Out
@@ -180,18 +170,17 @@ jobs:
         repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
 
     # ---------------------------------------------------------------
-    # Core Makefile patching — fully user-controlled:
-    #   PATCH_CORE_MAKEFILE=false  -> skip entirely
-    #   MAKEFILE_PATCH_MODE=skip   -> skip entirely
-    #   MAKEFILE_PATCH_MODE=auto   -> built-in additive insertion (no-op if already present)
-    #   MAKEFILE_PATCH_MODE=custom -> apply user-supplied .patch from CUSTOM_MAKEFILE_PATCH_PATH
-    #                                (local path in workflow repo, path in device tree, or https:// URL)
-    # The file is never replaced; only additive edits/patches are applied.
+    # Install custom core Makefile (full replacement).
+    # Controls:
+    #   PATCH_CORE_MAKEFILE=true  -> download CUSTOM_MAKEFILE_URL and
+    #                                replace workspace/build/make/core/Makefile
+    #   PATCH_CORE_MAKEFILE=false -> leave stock twrp-14.1 Makefile untouched
+    # Fails the job if the URL is unreachable, returns empty/HTML, or the
+    # downloaded file doesn't look like a core Makefile. Never modifies any
+    # other build file.
     # ---------------------------------------------------------------
-    - name: Patch Core Makefile (additive, guarded)
-      if: >-
-        github.event.inputs.PATCH_CORE_MAKEFILE == 'true' &&
-        github.event.inputs.MAKEFILE_PATCH_MODE != 'skip'
+    - name: Install Custom Core Makefile
+      if: github.event.inputs.PATCH_CORE_MAKEFILE == 'true'
       run: |
         cd workspace
         MF=build/make/core/Makefile
@@ -200,89 +189,41 @@ jobs:
           exit 1
         fi
 
-        MODE="${{ github.event.inputs.MAKEFILE_PATCH_MODE }}"
-        echo "Patch mode: $MODE"
+        URL="${{ github.event.inputs.CUSTOM_MAKEFILE_URL }}"
+        echo "Downloading custom core Makefile: $URL"
 
-        # -------- custom --------
-        if [ "$MODE" = "custom" ]; then
-          PATCH_SRC="${{ github.event.inputs.CUSTOM_MAKEFILE_PATCH_PATH }}"
-          if [ -z "$PATCH_SRC" ]; then
-            echo "::error::custom mode requires CUSTOM_MAKEFILE_PATCH_PATH."
-            exit 1
-          fi
-
-          if [[ "$PATCH_SRC" =~ ^https?:// ]]; then
-            echo "Downloading custom patch from URL: $PATCH_SRC"
-            curl -fsSL "$PATCH_SRC" -o /tmp/custom_makefile.patch
-            PATCH_FILE=/tmp/custom_makefile.patch
-          elif [ -f "$GITHUB_WORKSPACE/$PATCH_SRC" ]; then
-            PATCH_FILE="$GITHUB_WORKSPACE/$PATCH_SRC"
-          elif [ -f "$GITHUB_WORKSPACE/workspace/${{ github.event.inputs.DEVICE_PATH }}/$PATCH_SRC" ]; then
-            PATCH_FILE="$GITHUB_WORKSPACE/workspace/${{ github.event.inputs.DEVICE_PATH }}/$PATCH_SRC"
-          else
-            echo "::error::Custom patch file not found: $PATCH_SRC"
-            exit 1
-          fi
-
-          echo "Applying custom patch: $PATCH_FILE"
-          echo "---- patch preview (first 40 lines) ----"
-          head -40 "$PATCH_FILE" || true
-          echo "----------------------------------------"
-
-          # Patches are applied with build/make/ as the working directory,
-          # so paths inside the patch should be relative to that (e.g. core/Makefile).
-          if ( cd build/make && git apply --verbose "$PATCH_FILE" ); then
-            echo "Applied with git apply."
-          elif ( cd build/make && patch -p1 --forward --verbose < "$PATCH_FILE" ); then
-            echo "Applied with patch -p1."
-          else
-            echo "::error::Custom patch failed to apply cleanly."
-            exit 1
-          fi
-
-          echo "---- verification (look for BOARD_PREBUILT_VENDOR_RAMDISK) ----"
-          grep -n 'BOARD_PREBUILT_VENDOR_RAMDISK' "$MF" || \
-            echo "::warning::Your custom patch did not add BOARD_PREBUILT_VENDOR_RAMDISK; this is fine if intentional."
-          exit 0
+        if ! curl -fsSL "$URL" -o /tmp/custom_Makefile; then
+          echo "::error::Failed to download $URL"
+          exit 1
+        fi
+        if [ ! -s /tmp/custom_Makefile ]; then
+          echo "::error::Downloaded Makefile is empty."
+          exit 1
+        fi
+        if head -1 /tmp/custom_Makefile | grep -qi '<!DOCTYPE\|<html'; then
+          echo "::error::Downloaded file looks like HTML, not a Makefile (bad URL?)."
+          exit 1
+        fi
+        if ! grep -q 'INTERNAL_VENDOR_RAMDISK_TARGET' /tmp/custom_Makefile; then
+          echo "::error::Downloaded file does not reference INTERNAL_VENDOR_RAMDISK_TARGET — wrong file."
+          exit 1
         fi
 
-        # -------- auto --------
-        if grep -q 'ifdef BOARD_PREBUILT_VENDOR_RAMDISK' "$MF"; then
-          echo "Makefile already supports BOARD_PREBUILT_VENDOR_RAMDISK — nothing to do."
-          exit 0
-        fi
+        # Show what changed vs. the synced stock file (for the log)
+        echo "---- diff summary vs stock core/Makefile ----"
+        diff -u "$MF" /tmp/custom_Makefile | head -40 || true
+        echo "---------------------------------------------"
 
-        echo "Inserting BOARD_PREBUILT_VENDOR_RAMDISK branch (auto mode)..."
-        python3 - "$MF" <<'PY'
-        import pathlib, sys
-        p = pathlib.Path(sys.argv[1])
-        src = p.read_text()
-
-        old = (
-            '$(INTERNAL_VENDOR_RAMDISK_TARGET): $(MKBOOTFS) $(INTERNAL_VENDOR_RAMDISK_FILES) | $(COMPRESSION_COMMAND_DEPS)\n'
-            '\t$(MKBOOTFS) -d $(TARGET_OUT) $(TARGET_VENDOR_RAMDISK_OUT) $(PRIVATE_ADDITIONAL_DIR) | $(COMPRESSION_COMMAND) > $@\n'
-        )
-        new = (
-            'ifdef BOARD_PREBUILT_VENDOR_RAMDISK\n'
-            '$(INTERNAL_VENDOR_RAMDISK_TARGET): $(BOARD_PREBUILT_VENDOR_RAMDISK)\n'
-            '\t$(hide) mkdir -p $(dir $@)\n'
-            '\t$(hide) cp $(BOARD_PREBUILT_VENDOR_RAMDISK) $@\n'
-            'else\n'
-            '$(INTERNAL_VENDOR_RAMDISK_TARGET): $(MKBOOTFS) $(INTERNAL_VENDOR_RAMDISK_FILES) | $(COMPRESSION_COMMAND_DEPS)\n'
-            '\t$(MKBOOTFS) -d $(TARGET_OUT) $(TARGET_VENDOR_RAMDISK_OUT) $(PRIVATE_ADDITIONAL_DIR) | $(COMPRESSION_COMMAND) > $@\n'
-            'endif\n'
-        )
-
-        if old not in src:
-            print("ERROR: exact ramdisk rule not found in Makefile — aborting.", file=sys.stderr)
-            sys.exit(1)
-
-        p.write_text(src.replace(old, new, 1))
-        print("Inserted ifdef/else/endif wrapper around $(INTERNAL_VENDOR_RAMDISK_TARGET) rule.")
-        PY
+        cp /tmp/custom_Makefile "$MF"
+        echo "Replaced $MF with custom version."
 
         echo "---- verification ----"
-        grep -A4 'ifdef BOARD_PREBUILT_VENDOR_RAMDISK' "$MF"
+        if grep -q 'ifdef BOARD_PREBUILT_VENDOR_RAMDISK' "$MF"; then
+          echo "✅ BOARD_PREBUILT_VENDOR_RAMDISK branch present."
+          grep -A4 'ifdef BOARD_PREBUILT_VENDOR_RAMDISK' "$MF" | head -8 || true
+        else
+          echo "::warning::Custom Makefile does not contain BOARD_PREBUILT_VENDOR_RAMDISK — the small-ramdisk fallback will happen."
+        fi
 
     - name: Clone Device Tree
       run: |
@@ -369,8 +310,8 @@ jobs:
         echo "vendor_boot.img size: $SIZE bytes ($(numfmt --to=iec $SIZE))"
         if [ "$SIZE" -lt 20000000 ]; then
           echo "::error::vendor_boot.img is only $SIZE bytes — the platform ramdisk is empty/AOSP-generated."
-          echo "Check that BOARD_PREBUILT_VENDOR_RAMDISK is set and that the core Makefile actually honours it."
-          echo "If you used MAKEFILE_PATCH_MODE=skip, verify the manifest branch already supports the variable."
+          echo "Check that BOARD_PREBUILT_VENDOR_RAMDISK is set and that core/Makefile actually honours it."
+          echo "If you set PATCH_CORE_MAKEFILE=false, verify the manifest branch already supports the variable."
           exit 1
         fi
 
