@@ -1,0 +1,445 @@
+name: TWRP Recovery Builder 2024
+
+on:
+  workflow_dispatch:
+    inputs:
+      MANIFEST_BRANCH:
+        description: 'TWRP Minimal-Manifest Branch'
+        required: true
+        default: 'twrp-14.1'
+        type: choice
+        options:
+        - twrp-14.1
+        - twrp-12.1
+        - twrp-11
+        - twrp-9.0
+      DEVICE_TREE:
+        description: 'Custom Recovery Tree (full git URL)'
+        required: true
+        default: ''
+      DEVICE_TREE_BRANCH:
+        description: 'Custom Recovery Tree Branch'
+        required: true
+        default: ''
+      DEVICE_PATH:
+        description: 'Device Path inside workspace (e.g. device/lava/lxx521)'
+        required: true
+        default: ''
+      DEVICE_NAME:
+        description: 'Device Codename (e.g. lxx521)'
+        required: true
+        default: ''
+      BUILD_TARGET:
+        description: 'Build Target'
+        required: true
+        default: 'vendorboot'
+        type: choice
+        options:
+        - boot
+        - recovery
+        - vendorboot
+      LDCHECK:
+        description: 'Path of blobs to check'
+        required: true
+        default: 'system/bin/qseecomd'
+      RECOVERY_TAR:
+        description: 'Release Recovery.tar For Samsung devices'
+        required: false
+        default: false
+        type: boolean
+      RECOVERY_INSTALLER:
+        description: 'Include recovery installer.zip'
+        type: boolean
+        required: true
+        default: true
+      PATCH_CORE_MAKEFILE:
+        description: 'Patch build/make/core/Makefile (set false to leave it untouched)'
+        required: true
+        default: true
+        type: boolean
+      MAKEFILE_PATCH_MODE:
+        description: 'Makefile patch mode: auto=insert if missing, custom=apply your .patch, skip=do not touch'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+        - auto
+        - custom
+        - skip
+      CUSTOM_MAKEFILE_PATCH_PATH:
+        description: 'Only for mode=custom. Path in workflow repo, path in device tree, or https:// URL to a .patch file'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Build TWRP by ${{ github.actor }}
+    runs-on: ubuntu-22.04
+    if: github.event.repository.owner.id == github.event.sender.id
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: write
+    steps:
+    - name: Validate Inputs
+      run: |
+        fail=0
+        for v in DEVICE_TREE DEVICE_TREE_BRANCH DEVICE_PATH DEVICE_NAME MANIFEST_BRANCH; do
+          case "$v" in
+            DEVICE_TREE)        val="${{ github.event.inputs.DEVICE_TREE }}" ;;
+            DEVICE_TREE_BRANCH) val="${{ github.event.inputs.DEVICE_TREE_BRANCH }}" ;;
+            DEVICE_PATH)        val="${{ github.event.inputs.DEVICE_PATH }}" ;;
+            DEVICE_NAME)        val="${{ github.event.inputs.DEVICE_NAME }}" ;;
+            MANIFEST_BRANCH)    val="${{ github.event.inputs.MANIFEST_BRANCH }}" ;;
+          esac
+          if [ -z "$val" ]; then
+            echo "::error::Input $v is empty."
+            fail=1
+          fi
+        done
+        if [ "${{ github.event.inputs.MAKEFILE_PATCH_MODE }}" = "custom" ] && \
+           [ -z "${{ github.event.inputs.CUSTOM_MAKEFILE_PATCH_PATH }}" ]; then
+          echo "::error::MAKEFILE_PATCH_MODE=custom requires CUSTOM_MAKEFILE_PATCH_PATH."
+          fail=1
+        fi
+        [ "$fail" -eq 0 ] || exit 1
+
+    - name: Display Inputs
+      run: |
+        echo "::group::User Environment Variables"
+        echo "Manifest Branch: ${{ github.event.inputs.MANIFEST_BRANCH }}"
+        echo "Device Tree: ${{ github.event.inputs.DEVICE_TREE }}"
+        echo "Device Branch: ${{ github.event.inputs.DEVICE_TREE_BRANCH }}"
+        echo "Device Path: ${{ github.event.inputs.DEVICE_PATH }}"
+        echo "Device Name: ${{ github.event.inputs.DEVICE_NAME }}"
+        echo "Build Target: ${{ github.event.inputs.BUILD_TARGET }}image"
+        echo "Include Recovery Installer: ${{ github.event.inputs.RECOVERY_INSTALLER }}"
+        echo "Release recovery.tar For Samsung devices: ${{ github.event.inputs.RECOVERY_TAR }}"
+        echo "Patch Core Makefile: ${{ github.event.inputs.PATCH_CORE_MAKEFILE }}"
+        echo "Makefile Patch Mode: ${{ github.event.inputs.MAKEFILE_PATCH_MODE }}"
+        echo "Custom Patch Path: ${{ github.event.inputs.CUSTOM_MAKEFILE_PATCH_PATH }}"
+        echo "::endgroup::"
+
+    - name: Check Out
+      uses: actions/checkout@v3
+
+    - name: Cleanup
+      uses: rokibhasansagar/slimhub_actions@main
+
+    - name: Set Swap Space
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 24
+
+    - name: Prepare the environment
+      run: |
+        sudo apt update
+        sudo apt -y upgrade
+        sudo apt -y install gperf gcc-multilib gcc-10-multilib g++-multilib g++-10-multilib \
+          lib32ncurses5-dev x11proto-core-dev lib32z-dev libgl1-mesa-dev libxml2-utils xsltproc bc ccache \
+          lib32readline-dev lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libwxgtk3.0-gtk3-dev \
+          lzop pngcrush schedtool squashfs-tools imagemagick libbz2-dev lzma ncftp qemu-user-static \
+          libstdc++-10-dev libtinfo5 libgflags-dev cpio
+        sudo add-apt-repository universe
+        sudo apt -y install libncurses5
+
+    - name: Install OpenJDK
+      uses: actions/setup-java@v4
+      with:
+        distribution: zulu
+        java-version: 8
+
+    - name: Install Git-Repo
+      run: |
+        mkdir ~/bin
+        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+        chmod a+x ~/bin/repo
+        sudo ln -sf ~/bin/repo /usr/bin/repo
+
+    - name: Check Manifest Branch
+      uses: haya14busa/action-cond@v1
+      id: manifest
+      with:
+        cond: ${{ github.event.inputs.MANIFEST_BRANCH == 'twrp-11' || github.event.inputs.MANIFEST_BRANCH == 'twrp-12.1' || github.event.inputs.MANIFEST_BRANCH == 'twrp-14.1' }}
+        if_true: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git
+        if_false: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni.git
+
+    - name: Initialize Repo
+      run: |
+        mkdir workspace
+        cd workspace
+        git config --global user.name "TWRP Builder"
+        git config --global user.email "builder@example.com"
+        repo init --depth=1 --partial-clone --clone-filter=blob:none \
+          -u ${{ steps.manifest.outputs.value }} \
+          -b ${{ github.event.inputs.MANIFEST_BRANCH }}
+
+    - name: Repo Sync
+      run: |
+        cd workspace
+        repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
+
+    # ---------------------------------------------------------------
+    # Core Makefile patching — fully user-controlled:
+    #   PATCH_CORE_MAKEFILE=false  -> skip entirely
+    #   MAKEFILE_PATCH_MODE=skip   -> skip entirely
+    #   MAKEFILE_PATCH_MODE=auto   -> built-in additive insertion (no-op if already present)
+    #   MAKEFILE_PATCH_MODE=custom -> apply user-supplied .patch from CUSTOM_MAKEFILE_PATCH_PATH
+    #                                (local path in workflow repo, path in device tree, or https:// URL)
+    # The file is never replaced; only additive edits/patches are applied.
+    # ---------------------------------------------------------------
+    - name: Patch Core Makefile (additive, guarded)
+      if: >-
+        github.event.inputs.PATCH_CORE_MAKEFILE == 'true' &&
+        github.event.inputs.MAKEFILE_PATCH_MODE != 'skip'
+      run: |
+        cd workspace
+        MF=build/make/core/Makefile
+        if [ ! -f "$MF" ]; then
+          echo "::error::$MF not found after repo sync."
+          exit 1
+        fi
+
+        MODE="${{ github.event.inputs.MAKEFILE_PATCH_MODE }}"
+        echo "Patch mode: $MODE"
+
+        # -------- custom --------
+        if [ "$MODE" = "custom" ]; then
+          PATCH_SRC="${{ github.event.inputs.CUSTOM_MAKEFILE_PATCH_PATH }}"
+          if [ -z "$PATCH_SRC" ]; then
+            echo "::error::custom mode requires CUSTOM_MAKEFILE_PATCH_PATH."
+            exit 1
+          fi
+
+          if [[ "$PATCH_SRC" =~ ^https?:// ]]; then
+            echo "Downloading custom patch from URL: $PATCH_SRC"
+            curl -fsSL "$PATCH_SRC" -o /tmp/custom_makefile.patch
+            PATCH_FILE=/tmp/custom_makefile.patch
+          elif [ -f "$GITHUB_WORKSPACE/$PATCH_SRC" ]; then
+            PATCH_FILE="$GITHUB_WORKSPACE/$PATCH_SRC"
+          elif [ -f "$GITHUB_WORKSPACE/workspace/${{ github.event.inputs.DEVICE_PATH }}/$PATCH_SRC" ]; then
+            PATCH_FILE="$GITHUB_WORKSPACE/workspace/${{ github.event.inputs.DEVICE_PATH }}/$PATCH_SRC"
+          else
+            echo "::error::Custom patch file not found: $PATCH_SRC"
+            exit 1
+          fi
+
+          echo "Applying custom patch: $PATCH_FILE"
+          echo "---- patch preview (first 40 lines) ----"
+          head -40 "$PATCH_FILE" || true
+          echo "----------------------------------------"
+
+          # Patches are applied with build/make/ as the working directory,
+          # so paths inside the patch should be relative to that (e.g. core/Makefile).
+          if ( cd build/make && git apply --verbose "$PATCH_FILE" ); then
+            echo "Applied with git apply."
+          elif ( cd build/make && patch -p1 --forward --verbose < "$PATCH_FILE" ); then
+            echo "Applied with patch -p1."
+          else
+            echo "::error::Custom patch failed to apply cleanly."
+            exit 1
+          fi
+
+          echo "---- verification (look for BOARD_PREBUILT_VENDOR_RAMDISK) ----"
+          grep -n 'BOARD_PREBUILT_VENDOR_RAMDISK' "$MF" || \
+            echo "::warning::Your custom patch did not add BOARD_PREBUILT_VENDOR_RAMDISK; this is fine if intentional."
+          exit 0
+        fi
+
+        # -------- auto --------
+        if grep -q 'ifdef BOARD_PREBUILT_VENDOR_RAMDISK' "$MF"; then
+          echo "Makefile already supports BOARD_PREBUILT_VENDOR_RAMDISK — nothing to do."
+          exit 0
+        fi
+
+        echo "Inserting BOARD_PREBUILT_VENDOR_RAMDISK branch (auto mode)..."
+        python3 - "$MF" <<'PY'
+        import pathlib, sys
+        p = pathlib.Path(sys.argv[1])
+        src = p.read_text()
+
+        old = (
+            '$(INTERNAL_VENDOR_RAMDISK_TARGET): $(MKBOOTFS) $(INTERNAL_VENDOR_RAMDISK_FILES) | $(COMPRESSION_COMMAND_DEPS)\n'
+            '\t$(MKBOOTFS) -d $(TARGET_OUT) $(TARGET_VENDOR_RAMDISK_OUT) $(PRIVATE_ADDITIONAL_DIR) | $(COMPRESSION_COMMAND) > $@\n'
+        )
+        new = (
+            'ifdef BOARD_PREBUILT_VENDOR_RAMDISK\n'
+            '$(INTERNAL_VENDOR_RAMDISK_TARGET): $(BOARD_PREBUILT_VENDOR_RAMDISK)\n'
+            '\t$(hide) mkdir -p $(dir $@)\n'
+            '\t$(hide) cp $(BOARD_PREBUILT_VENDOR_RAMDISK) $@\n'
+            'else\n'
+            '$(INTERNAL_VENDOR_RAMDISK_TARGET): $(MKBOOTFS) $(INTERNAL_VENDOR_RAMDISK_FILES) | $(COMPRESSION_COMMAND_DEPS)\n'
+            '\t$(MKBOOTFS) -d $(TARGET_OUT) $(TARGET_VENDOR_RAMDISK_OUT) $(PRIVATE_ADDITIONAL_DIR) | $(COMPRESSION_COMMAND) > $@\n'
+            'endif\n'
+        )
+
+        if old not in src:
+            print("ERROR: exact ramdisk rule not found in Makefile — aborting.", file=sys.stderr)
+            sys.exit(1)
+
+        p.write_text(src.replace(old, new, 1))
+        print("Inserted ifdef/else/endif wrapper around $(INTERNAL_VENDOR_RAMDISK_TARGET) rule.")
+        PY
+
+        echo "---- verification ----"
+        grep -A4 'ifdef BOARD_PREBUILT_VENDOR_RAMDISK' "$MF"
+
+    - name: Clone Device Tree
+      run: |
+        cd workspace
+        git clone ${{ github.event.inputs.DEVICE_TREE }} \
+          -b ${{ github.event.inputs.DEVICE_TREE_BRANCH }} \
+          ./${{ github.event.inputs.DEVICE_PATH }}
+        cd ${{ github.event.inputs.DEVICE_PATH }}
+        echo "COMMIT_ID=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+    - name: Check Build Makefile
+      run: |
+        cd workspace
+        if [ -f ${{ github.event.inputs.DEVICE_PATH }}/twrp_${{ github.event.inputs.DEVICE_NAME }}.mk ]; then
+            echo "DEVICE_MAKEFILE=twrp_${{ github.event.inputs.DEVICE_NAME }}" >> $GITHUB_ENV
+        elif [ -f ${{ github.event.inputs.DEVICE_PATH }}/omni_${{ github.event.inputs.DEVICE_NAME }}.mk ]; then
+            echo "DEVICE_MAKEFILE=omni_${{ github.event.inputs.DEVICE_NAME }}" >> $GITHUB_ENV
+        else
+            echo "::error::No recovery makefile (twrp_<codename>.mk / omni_<codename>.mk) in ${{ github.event.inputs.DEVICE_PATH }}"
+            exit 1
+        fi
+
+    - name: Verify Prebuilt Vendor Ramdisk
+      if: github.event.inputs.BUILD_TARGET == 'vendorboot'
+      run: |
+        cd workspace/${{ github.event.inputs.DEVICE_PATH }}
+        if ! grep -q 'BOARD_PREBUILT_VENDOR_RAMDISK' BoardConfig.mk; then
+          echo "::warning::BOARD_PREBUILT_VENDOR_RAMDISK not found in BoardConfig.mk."
+          echo "If you are relying on a different ramdisk injection mechanism, ignore this."
+          exit 0
+        fi
+
+        RB=$(grep 'BOARD_PREBUILT_VENDOR_RAMDISK' BoardConfig.mk | head -1 \
+             | sed 's/.*:= *//' \
+             | sed "s|\$(DEVICE_PATH)|${{ github.event.inputs.DEVICE_PATH }}|")
+        echo "Referenced prebuilt: $RB"
+
+        FOUND=""
+        for P in "$RB" "../$RB" "../../$RB" "$GITHUB_WORKSPACE/workspace/$RB"; do
+          if [ -f "$P" ]; then FOUND="$P"; break; fi
+        done
+        if [ -z "$FOUND" ]; then
+          echo "::error::Prebuilt vendor ramdisk not found at $RB"
+          echo "Extract vendor_ramdisk00 from a known-working stock vendor_boot.img and commit it to the device tree."
+          exit 1
+        fi
+
+        SIZE=$(stat -c%s "$FOUND")
+        echo "Prebuilt ramdisk: $FOUND ($SIZE bytes)"
+        if [ "$SIZE" -lt 20000000 ]; then
+          echo "::error::Prebuilt ramdisk is only $SIZE bytes (<20MB)."
+          echo "The stock vendor_ramdisk00 is typically 60-70MB — you've likely pointed at the wrong file."
+          exit 1
+        fi
+
+    - name: Install Python 2
+      if: github.event.inputs.MANIFEST_BRANCH != 'twrp-11' && github.event.inputs.MANIFEST_BRANCH != 'twrp-12.1' && github.event.inputs.MANIFEST_BRANCH != 'twrp-14.1'
+      run: |
+        sudo apt -y install python2
+        cd /usr/bin
+        sudo ln -sf python2 python
+
+    - name: Building Image
+      run: |
+        cd workspace
+        source build/envsetup.sh
+        export ALLOW_MISSING_DEPENDENCIES=true
+        lunch ${{ env.DEVICE_MAKEFILE }}-eng
+        rm -rf out
+        make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
+        echo "Done building your ${{ github.event.inputs.BUILD_TARGET }}.img"
+
+    - name: Verify Vendor Ramdisk Size
+      if: github.event.inputs.BUILD_TARGET == 'vendorboot'
+      run: |
+        cd workspace
+        OUT=out/target/product/${{ github.event.inputs.DEVICE_NAME }}
+        VBOOT="$OUT/vendor_boot.img"
+        if [ ! -f "$VBOOT" ]; then
+          echo "::error::vendor_boot.img was not produced."
+          exit 1
+        fi
+        SIZE=$(stat -c%s "$VBOOT")
+        echo "vendor_boot.img size: $SIZE bytes ($(numfmt --to=iec $SIZE))"
+        if [ "$SIZE" -lt 20000000 ]; then
+          echo "::error::vendor_boot.img is only $SIZE bytes — the platform ramdisk is empty/AOSP-generated."
+          echo "Check that BOARD_PREBUILT_VENDOR_RAMDISK is set and that the core Makefile actually honours it."
+          echo "If you used MAKEFILE_PATCH_MODE=skip, verify the manifest branch already supports the variable."
+          exit 1
+        fi
+
+    - name: Set Build Date
+      run: |
+        echo "BUILD_DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
+        DEVICE_TREE_URL="${{ github.event.inputs.DEVICE_TREE }}"
+        if [[ "${DEVICE_TREE_URL}" == *.git ]]; then
+          DEVICE_TREE_URL="${DEVICE_TREE_URL%.git}"
+        fi
+        echo "DEVICE_TREE_URL=${DEVICE_TREE_URL}" >> $GITHUB_ENV
+
+    - name: Detect Built Image
+      run: |
+        cd workspace
+        OUT=out/target/product/${{ github.event.inputs.DEVICE_NAME }}
+        if [ -f "$OUT/recovery.img" ]; then
+            echo "RECOVERY_TYPE=recovery" >> $GITHUB_ENV
+            echo "IMG_FILE=recovery.img" >> $GITHUB_ENV
+        elif [ -f "$OUT/boot.img" ]; then
+            echo "RECOVERY_TYPE=boot" >> $GITHUB_ENV
+            echo "IMG_FILE=boot.img" >> $GITHUB_ENV
+        elif [ -f "$OUT/vendor_boot.img" ]; then
+            echo "RECOVERY_TYPE=vendor_boot" >> $GITHUB_ENV
+            echo "IMG_FILE=vendor_boot.img" >> $GITHUB_ENV
+        else
+            echo "::error::No recovery image found in $OUT"
+            exit 1
+        fi
+        echo "MD5_IMG=$(md5sum $OUT/$IMG_FILE | cut -d ' ' -f 1)" >> $GITHUB_ENV
+
+    - name: Include Recovery Installer
+      if: github.event.inputs.RECOVERY_INSTALLER == 'true'
+      run: |
+        cd workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/
+        wget https://github.com/kinguser981/recovery-installer/releases/download/zip/recovery-installer.zip
+        zip -ur recovery-installer.zip ${{ env.IMG_FILE }}
+      continue-on-error: true
+
+    - name: Recovery to tar for Samsung devices
+      if: github.event.inputs.RECOVERY_TAR == 'true'
+      run: |
+        cd workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/
+        tar -cvf ${{ env.RECOVERY_TYPE }}.tar ${{ env.IMG_FILE }}
+      continue-on-error: true
+
+    - name: Upload to Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ env.RECOVERY_TYPE }}.tar
+          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/recovery-installer.zip
+          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ env.IMG_FILE }}
+        name: Unofficial TWRP for ${{ github.event.inputs.DEVICE_NAME }} // ${{ env.BUILD_DATE }}
+        tag_name: ${{ github.run_id }}
+        body: |
+          Manifest: ${{ github.event.inputs.MANIFEST_BRANCH }}
+          Target: ${{ env.IMG_FILE }}
+          Device: [Device Tree/Branch](${{ env.DEVICE_TREE_URL }}/tree/${{ github.event.inputs.DEVICE_TREE_BRANCH }})
+          Commit: Most recent [commit](${{ env.DEVICE_TREE_URL }}/commit/${{ env.COMMIT_ID }}) during building.
+          MD5 (img): ${{ env.MD5_IMG }}
+
+    - name: Release Ramdisks (debug)
+      if: github.event.inputs.BUILD_TARGET == 'vendorboot'
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/obj/PACKAGING/vendor_ramdisk_fragments_intermediates/recovery.*
+          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/obj/PACKAGING/vendor_boot_intermediates/vendor_ramdisk.*
+          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/ramdisk-recovery.*
+        name: Unofficial TWRP for ${{ github.event.inputs.DEVICE_NAME }} // ${{ env.BUILD_DATE }}
+        tag_name: ${{ github.run_id }}
