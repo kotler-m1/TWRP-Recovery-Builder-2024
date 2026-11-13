@@ -53,12 +53,12 @@ on:
         required: true
         default: true
       PATCH_CORE_MAKEFILE:
-        description: 'Replace build/make/core/Makefile with custom version from kotler-m1 (set false to keep stock)'
+        description: 'Replace build/make/core/Makefile with custom version (set false to keep stock)'
         required: true
-        default: true
+        default: false
         type: boolean
       CUSTOM_MAKEFILE_URL:
-        description: 'Raw URL of the custom core Makefile'
+        description: 'Raw URL of the custom core Makefile (only used if PATCH_CORE_MAKEFILE=true)'
         required: false
         default: 'https://raw.githubusercontent.com/kotler-m1/android_device_lava_LXX521-recovery/PE-14/Makefile'
 
@@ -169,48 +169,21 @@ jobs:
         cd workspace
         repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --force-sync
 
+    # NOTE: The "Patch TW_LOAD_VENDOR_MODULES quoting" step is intentionally
+    # removed. With Fix A, TW_LOAD_VENDOR_MODULES is unset in BoardConfig.mk,
+    # so no .ko list reaches the -D flag and the clang argument-splitting bug
+    # cannot occur. Modules are loaded explicitly via insmod from
+    # init.recovery.trustkernel.rc.
+
     # ---------------------------------------------------------------
-    # Patch bootable/recovery/Android.mk — fix TW_LOAD_VENDOR_MODULES
-    # quoting. On twrp-12.1 the -D flag is written without the
-    # surrounding \"...\", so bash splits the .ko list and clang
-    # receives each .ko as a separate positional argument.
-    # On twrp-14.1 the file is already correct; the "already quoted"
-    # branch makes this a no-op.
-    # ---------------------------------------------------------------
-    - name: Patch TW_LOAD_VENDOR_MODULES quoting
-      run: |
-        cd workspace
-        AM=bootable/recovery/Android.mk
-        if [ ! -f "$AM" ]; then
-          echo "::error::$AM not found after repo sync."
-          exit 1
-        fi
-
-        echo "---- before ----"
-        grep -n 'TW_LOAD_VENDOR_MODULES' "$AM" || true
-
-        # Already quoted? Nothing to do.
-        if grep -q 'TW_LOAD_VENDOR_MODULES=\\"\$(TW_LOAD_VENDOR_MODULES)\\"' "$AM"; then
-          echo "Already quoted — skipping patch."
-          exit 0
-        fi
-
-        # Wrap $(TW_LOAD_VENDOR_MODULES) in \"...\" on the -D line.
-        sed -i -E 's|-DTW_LOAD_VENDOR_MODULES=\$\(TW_LOAD_VENDOR_MODULES\)|-DTW_LOAD_VENDOR_MODULES=\\"$(TW_LOAD_VENDOR_MODULES)\\"|g' "$AM"
-
-        echo "---- after ----"
-        grep -n 'TW_LOAD_VENDOR_MODULES' "$AM" || true
-
-        if ! grep -q 'TW_LOAD_VENDOR_MODULES=\\"\$(TW_LOAD_VENDOR_MODULES)\\"' "$AM"; then
-          echo "::error::Patch did not apply — the Android.mk pattern has changed."
-          echo "Run this locally to inspect:"
-          echo "  grep -n 'TW_LOAD_VENDOR_MODULES' bootable/recovery/Android.mk"
-          exit 1
-        fi
-        echo "Patched: TW_LOAD_VENDOR_MODULES is now quoted."
-
     # Install custom core Makefile (full replacement).
-    
+    #   PATCH_CORE_MAKEFILE=true  -> download CUSTOM_MAKEFILE_URL and
+    #                                replace workspace/build/make/core/Makefile
+    #   PATCH_CORE_MAKEFILE=false -> leave stock twrp-12.1 Makefile untouched
+    #
+    # Default is now false because stock twrp-12.1 already honours
+    # BOARD_PREBUILT_VENDOR_RAMDISK.
+    # ---------------------------------------------------------------
     - name: Install Custom Core Makefile
       if: github.event.inputs.PATCH_CORE_MAKEFILE == 'true'
       run: |
@@ -277,6 +250,20 @@ jobs:
             exit 1
         fi
 
+    # Verification: confirm Fix A is actually in effect (TW_LOAD_VENDOR_MODULES
+    # unset in BoardConfig.mk). This makes failures diagnosable if the tree
+    # regresses to setting the variable again.
+    - name: Verify Fix A (TW_LOAD_VENDOR_MODULES removed)
+      run: |
+        cd workspace/${{ github.event.inputs.DEVICE_PATH }}
+        if grep -E '^\s*TW_LOAD_VENDOR_MODULES\s*:=' BoardConfig.mk >/dev/null 2>&1; then
+          echo "::warning::TW_LOAD_VENDOR_MODULES is still set in BoardConfig.mk."
+          echo "Fix A expects this variable to be removed so that .ko names do not leak into clang++."
+          echo "If the build later fails with 'clang++: no such file or directory: *.ko', this is why."
+        else
+          echo "✅ Fix A active: TW_LOAD_VENDOR_MODULES is not defined in BoardConfig.mk."
+        fi
+
     - name: Install Python 2
       if: github.event.inputs.MANIFEST_BRANCH != 'twrp-11' && github.event.inputs.MANIFEST_BRANCH != 'twrp-12.1' && github.event.inputs.MANIFEST_BRANCH != 'twrp-14.1'
       run: |
@@ -308,8 +295,7 @@ jobs:
         echo "vendor_boot.img size: $SIZE bytes ($(numfmt --to=iec $SIZE))"
         if [ "$SIZE" -lt 20000000 ]; then
           echo "::error::vendor_boot.img is only $SIZE bytes — the platform ramdisk is empty/AOSP-generated."
-          echo "Check that BOARD_PREBUILT_VENDOR_RAMDISK is set and that core/Makefile actually honours it."
-          echo "If you set PATCH_CORE_MAKEFILE=false, verify the manifest branch already supports the variable."
+          echo "Check that BOARD_PREBUILT_VENDOR_RAMDISK is set in BoardConfig.mk and points at the ~60 MB stock ramdisk."
           exit 1
         fi
 
