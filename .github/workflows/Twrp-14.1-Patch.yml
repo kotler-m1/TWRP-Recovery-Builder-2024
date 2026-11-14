@@ -53,7 +53,7 @@ on:
         required: true
         default: true
       CUSTOM_MAKEFILE_URL:
-        description: 'Optional: URL of a custom build/make/core/Makefile to override (leave blank to use default)'
+        description: 'Optional: raw URL of a custom build/make/core/Makefile to override TWRP 14.1 default (leave blank to use stock)'
         required: false
         default: ''
 
@@ -139,6 +139,10 @@ jobs:
         echo "URL: ${{ github.event.inputs.CUSTOM_MAKEFILE_URL }}"
         cd workspace
         wget -q -O build/make/core/Makefile "${{ github.event.inputs.CUSTOM_MAKEFILE_URL }}"
+        if [ ! -s build/make/core/Makefile ]; then
+          echo "::error::Custom Makefile download failed or is empty. Aborting."
+          exit 1
+        fi
         echo "--- First 5 lines of new Makefile ---"
         head -n 5 build/make/core/Makefile
         echo "--- SHA256 ---"
