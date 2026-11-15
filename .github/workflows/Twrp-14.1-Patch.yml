@@ -1,4 +1,4 @@
-name: TWRP Builder (Patched for 14.1)
+name: TWRP Recovery Builder 2024 (Patched for 14.1)
 
 on:
   workflow_dispatch:
@@ -90,6 +90,13 @@ jobs:
       with:
         swap-size-gb: 24
 
+    - name: Tune Swap Aggressiveness
+      run: |
+        sudo sysctl -w vm.swappiness=80
+        sudo sysctl -w vm.vfs_cache_pressure=50
+        sudo sysctl -w vm.direct_swappiness=0
+        sudo sysctl -w vm.overcommit_memory=1
+
     - name: Prepare the environment
       run: |
         sudo apt update
@@ -126,6 +133,21 @@ jobs:
         git config --global user.name "Your Name"
         git config --global user.email "your.email@example.com"
         repo init --depth=1 -u ${{ steps.manifest.outputs.value }} -b ${{ github.event.inputs.MANIFEST_BRANCH }}
+
+    - name: Add Local Manifests (missing dependencies)
+      run: |
+        cd workspace
+        mkdir -p .repo/local_manifests
+        cat > .repo/local_manifests/deps.xml << 'EOF'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <manifest>
+          <remote name="aosp" fetch="https://android.googlesource.com/" />
+          <project path="external/guava" name="platform/external/guava" remote="aosp" revision="android-14.0.0_r1" />
+          <project path="system/security" name="platform/system/security" remote="aosp" revision="android-14.0.0_r1" />
+        </manifest>
+        EOF
+        echo "--- Local manifest written ---"
+        cat .repo/local_manifests/deps.xml
 
     - name: Repo Sync
       run: |
