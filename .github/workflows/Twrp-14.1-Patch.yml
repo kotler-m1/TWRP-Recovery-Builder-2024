@@ -154,6 +154,17 @@ jobs:
         cd workspace
         repo sync -j$(nproc --all) --force-sync
 
+    - name: Verify Guava Presence
+      run: |
+        cd workspace
+        if [ -d "external/guava" ]; then
+          echo "guava directory exists"
+          ls external/guava/Android.bp && echo "Android.bp found"
+        else
+          echo "::error::external/guava is missing - local manifest did not sync"
+          exit 1
+        fi
+
     - name: Apply Custom Makefile (optional)
       if: github.event.inputs.CUSTOM_MAKEFILE_URL != ''
       run: |
@@ -196,6 +207,7 @@ jobs:
         cd workspace
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
+        export SOONG_ALLOW_MISSING_DEPENDENCIES=true
         lunch ${{ env.DEVICE_MAKEFILE }}-ap2a-eng && make clean && make ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
         echo "Done building your ${{ github.event.inputs.BUILD_TARGET }}.img"
 
