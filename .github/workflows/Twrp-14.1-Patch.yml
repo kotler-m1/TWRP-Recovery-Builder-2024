@@ -91,18 +91,6 @@ jobs:
       with:
         swap-size-gb: 24
 
-    - name: Tune Swap Aggressiveness
-      run: |
-        echo 80 | sudo tee /proc/sys/vm/swappiness
-        echo 50 | sudo tee /proc/sys/vm/vfs_cache_pressure
-        echo 1 | sudo tee /proc/sys/vm/overcommit_memory
-        
-        if [ -f /proc/sys/vm/direct_swappiness ]; then
-          echo 0 | sudo tee /proc/sys/vm/direct_swappiness
-        else
-          echo "vm.direct_swappiness not supported on this kernel, skipping."
-        fi
-
     - name: Prepare the environment
       run: |
         sudo apt update
