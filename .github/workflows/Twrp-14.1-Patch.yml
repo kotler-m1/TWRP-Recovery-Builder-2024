@@ -1,14 +1,15 @@
-name: TWRP Recovery Builder 2024 (Patched for 14.1)
+name: TWRP Recovery Builder 2024 (OmniROM 14.1 Full Manifest)
 
 on:
   workflow_dispatch:
     inputs:
       MANIFEST_BRANCH:
-        description: 'TWRP Minimal-Manifest Branch'
+        description: 'TWRP Manifest Branch (omni-14.1 recommended for Android 14)'
         required: true
-        default: 'twrp-14.1'
+        default: 'omni-14.1'
         type: choice
         options:
+        - omni-14.1
         - twrp-14.1
         - twrp-12.1
         - twrp-11
@@ -53,7 +54,7 @@ on:
         required: true
         default: true
       CUSTOM_MAKEFILE_URL:
-        description: 'Optional: raw URL of a custom build/make/core/Makefile to override TWRP 14.1 default (leave blank to use stock)'
+        description: 'Optional: raw URL of a custom build/make/core/Makefile (leave blank for stock)'
         required: false
         default: ''
 
@@ -96,8 +97,6 @@ jobs:
         sudo sysctl -w vm.vfs_cache_pressure=50
         sudo sysctl -w vm.direct_swappiness=0
         sudo sysctl -w vm.overcommit_memory=1
-        echo "--- Current values ---"
-        sysctl vm.swappiness vm.vfs_cache_pressure vm.direct_swappiness vm.overcommit_memory
 
     - name: Prepare the environment
       run: |
@@ -120,13 +119,19 @@ jobs:
         chmod a+x ~/bin/repo
         sudo ln -sf ~/bin/repo /usr/bin/repo
 
-    - name: Check Manifest Branch
-      uses: haya14busa/action-cond@v1
-      id: manifest
-      with:
-        cond: ${{ github.event.inputs.MANIFEST_BRANCH == 'twrp-11' || github.event.inputs.MANIFEST_BRANCH == 'twrp-12.1'  || github.event.inputs.MANIFEST_BRANCH == 'twrp-14.1' }}
-        if_true: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git
-        if_false: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni.git
+    - name: Select Manifest URL and Branch
+      run: |
+        MB="${{ github.event.inputs.MANIFEST_BRANCH }}"
+        if [[ "$MB" == "omni-14.1" ]]; then
+          echo "MANIFEST_URL=https://github.com/minimal-manifest-twrp/platform_manifest.git" >> $GITHUB_ENV
+          echo "MANIFEST_BRANCH_ACTUAL=omni-14.1" >> $GITHUB_ENV
+        elif [[ "$MB" == "twrp-14.1" || "$MB" == "twrp-12.1" || "$MB" == "twrp-11" ]]; then
+          echo "MANIFEST_URL=https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git" >> $GITHUB_ENV
+          echo "MANIFEST_BRANCH_ACTUAL=$MB" >> $GITHUB_ENV
+        else
+          echo "MANIFEST_URL=https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni.git" >> $GITHUB_ENV
+          echo "MANIFEST_BRANCH_ACTUAL=$MB" >> $GITHUB_ENV
+        fi
 
     - name: Initialize Repo
       run: |
@@ -134,57 +139,27 @@ jobs:
         cd workspace
         git config --global user.name "Your Name"
         git config --global user.email "your.email@example.com"
-        repo init --depth=1 -u ${{ steps.manifest.outputs.value }} -b ${{ github.event.inputs.MANIFEST_BRANCH }}
-
-    - name: Add Local Manifests (missing dependencies)
-      run: |
-        cd workspace
-        mkdir -p .repo/local_manifests
-        cat > .repo/local_manifests/deps.xml << 'EOF'
-        <?xml version="1.0" encoding="UTF-8"?>
-        <manifest>
-          <remote name="aosp" fetch="https://android.googlesource.com/" />
-          <project path="external/guava" name="platform/external/guava" remote="aosp" revision="android-14.0.0_r1" />
-          <project path="system/security" name="platform/system/security" remote="aosp" revision="android-14.0.0_r1" />
-        </manifest>
-        EOF
-        echo "--- Local manifest written ---"
-        cat .repo/local_manifests/deps.xml
+        repo init --depth=1 -u ${{ env.MANIFEST_URL }} -b ${{ env.MANIFEST_BRANCH_ACTUAL }}
 
     - name: Repo Sync
       run: |
         cd workspace
         repo sync -j$(nproc --all) --force-sync
 
-    - name: Verify Guava Presence
+    - name: Verify Guava Presence (diagnostic)
       run: |
         cd workspace
         echo "::group::Checking external/guava"
         if [ -d "external/guava" ]; then
-          echo "external/guava directory exists"
-          ls -la external/guava/Android.bp || echo "WARNING: Android.bp missing in external/guava"
+          echo "external/guava exists"
+          ls external/guava/Android.bp
         else
-          echo "::error::external/guava is MISSING - local manifest did not sync"
-          echo "--- Local manifest content ---"
-          cat .repo/local_manifests/deps.xml || echo "deps.xml not found"
-          echo "--- Repo manifest grep ---"
-          repo manifest | grep -i guava || echo "guava not in manifest"
+          echo "external/guava is STILL MISSING"
+          echo "This means the selected manifest does not include guava."
+          echo "You must use the 'omni-14.1' manifest branch."
           exit 1
         fi
         echo "::endgroup::"
-
-    - name: Patch platform-compat Android.bp (remove guava dep)
-      run: |
-        cd workspace
-        BP_FILE="tools/platform-compat/java/android/processor/compat/unsupportedappusage/Android.bp"
-        if [ -f "$BP_FILE" ]; then
-          echo "Patching $BP_FILE to remove guava from unsupportedappusage-annotation-processor-lib"
-          sed -i '/name: "unsupportedappusage-annotation-processor-lib"/,/^}/ s/"guava",//' "$BP_FILE"
-          echo "--- Patched Android.bp ---"
-          cat "$BP_FILE"
-        else
-          echo "WARNING: $BP_FILE not found - skipping patch"
-        fi
 
     - name: Apply Custom Makefile (optional)
       if: github.event.inputs.CUSTOM_MAKEFILE_URL != ''
