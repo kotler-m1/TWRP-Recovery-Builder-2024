@@ -92,10 +92,12 @@ jobs:
 
     - name: Tune Swap Aggressiveness
       run: |
-        sudo sysctl -w vm.swappiness=80
+        sudo sysctl -w vm.swappiness=120
         sudo sysctl -w vm.vfs_cache_pressure=50
         sudo sysctl -w vm.direct_swappiness=0
         sudo sysctl -w vm.overcommit_memory=1
+        echo "--- Current values ---"
+        sysctl vm.swappiness vm.vfs_cache_pressure vm.direct_swappiness vm.overcommit_memory
 
     - name: Prepare the environment
       run: |
@@ -157,12 +159,31 @@ jobs:
     - name: Verify Guava Presence
       run: |
         cd workspace
+        echo "::group::Checking external/guava"
         if [ -d "external/guava" ]; then
-          echo "guava directory exists"
-          ls external/guava/Android.bp && echo "Android.bp found"
+          echo "external/guava directory exists"
+          ls -la external/guava/Android.bp || echo "WARNING: Android.bp missing in external/guava"
         else
-          echo "::error::external/guava is missing - local manifest did not sync"
+          echo "::error::external/guava is MISSING - local manifest did not sync"
+          echo "--- Local manifest content ---"
+          cat .repo/local_manifests/deps.xml || echo "deps.xml not found"
+          echo "--- Repo manifest grep ---"
+          repo manifest | grep -i guava || echo "guava not in manifest"
           exit 1
+        fi
+        echo "::endgroup::"
+
+    - name: Patch platform-compat Android.bp (remove guava dep)
+      run: |
+        cd workspace
+        BP_FILE="tools/platform-compat/java/android/processor/compat/unsupportedappusage/Android.bp"
+        if [ -f "$BP_FILE" ]; then
+          echo "Patching $BP_FILE to remove guava from unsupportedappusage-annotation-processor-lib"
+          sed -i '/name: "unsupportedappusage-annotation-processor-lib"/,/^}/ s/"guava",//' "$BP_FILE"
+          echo "--- Patched Android.bp ---"
+          cat "$BP_FILE"
+        else
+          echo "WARNING: $BP_FILE not found - skipping patch"
         fi
 
     - name: Apply Custom Makefile (optional)
