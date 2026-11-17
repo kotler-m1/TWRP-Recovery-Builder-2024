@@ -93,10 +93,15 @@ jobs:
 
     - name: Tune Swap Aggressiveness
       run: |
-        sudo sysctl -w vm.swappiness=120
-        sudo sysctl -w vm.vfs_cache_pressure=50
-        sudo sysctl -w vm.direct_swappiness=0
-        sudo sysctl -w vm.overcommit_memory=1
+        echo 80 | sudo tee /proc/sys/vm/swappiness
+        echo 50 | sudo tee /proc/sys/vm/vfs_cache_pressure
+        echo 1 | sudo tee /proc/sys/vm/overcommit_memory
+        
+        if [ -f /proc/sys/vm/direct_swappiness ]; then
+          echo 0 | sudo tee /proc/sys/vm/direct_swappiness
+        else
+          echo "vm.direct_swappiness not supported on this kernel, skipping."
+        fi
 
     - name: Prepare the environment
       run: |
@@ -141,6 +146,22 @@ jobs:
         git config --global user.email "your.email@example.com"
         repo init --depth=1 -u ${{ env.MANIFEST_URL }} -b ${{ env.MANIFEST_BRANCH_ACTUAL }}
 
+    - name: Add Local Manifests (missing dependencies)
+      if: github.event.inputs.MANIFEST_BRANCH != 'omni-14.1'
+      run: |
+        cd workspace
+        mkdir -p .repo/local_manifests
+        cat > .repo/local_manifests/deps.xml << 'EOF'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <manifest>
+          <remote name="aosp" fetch="https://android.googlesource.com/" />
+          <project path="external/guava" name="platform/external/guava" remote="aosp" revision="android-14.0.0_r1" />
+          <project path="system/security" name="platform/system/security" remote="aosp" revision="android-14.0.0_r1" />
+        </manifest>
+        EOF
+        echo "--- Local manifest written ---"
+        cat .repo/local_manifests/deps.xml
+
     - name: Repo Sync
       run: |
         cd workspace
@@ -151,15 +172,28 @@ jobs:
         cd workspace
         echo "::group::Checking external/guava"
         if [ -d "external/guava" ]; then
-          echo "external/guava exists"
+          echo "✅ external/guava exists"
           ls external/guava/Android.bp
         else
-          echo "external/guava is STILL MISSING"
+          echo "❌ external/guava is STILL MISSING"
           echo "This means the selected manifest does not include guava."
           echo "You must use the 'omni-14.1' manifest branch."
           exit 1
         fi
         echo "::endgroup::"
+
+    - name: Patch platform-compat Android.bp (remove guava dep)
+      run: |
+        cd workspace
+        BP_FILE="tools/platform-compat/java/android/processor/compat/unsupportedappusage/Android.bp"
+        if [ -f "$BP_FILE" ]; then
+          echo "Patching $BP_FILE to remove guava from unsupportedappusage-annotation-processor-lib"
+          sed -i '/name: "unsupportedappusage-annotation-processor-lib"/,/^}/ s/"guava",//' "$BP_FILE"
+          echo "--- Patched Android.bp ---"
+          cat "$BP_FILE"
+        else
+          echo "WARNING: $BP_FILE not found - skipping patch"
+        fi
 
     - name: Apply Custom Makefile (optional)
       if: github.event.inputs.CUSTOM_MAKEFILE_URL != ''
