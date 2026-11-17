@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       DEVICE_TREE:
-        description: 'Custom Recovery Tree URL (leave blank to skip cloning)'
+        description: 'Custom Recovery Tree URL'
         required: true
         default: ''
       DEVICE_TREE_BRANCH:
@@ -62,13 +62,15 @@ jobs:
 
     - name: Validate Inputs
       run: |
-        for var in DEVICE_TREE DEVICE_TREE_BRANCH DEVICE_PATH DEVICE_NAME; do
-          val="${{ github.event.inputs[env[var]] }}"
-          if [ -z "$val" ]; then
-            echo "::error::Input '$var' is required but was left blank."
-            exit 1
-          fi
-        done
+        fail=0
+        [ -z "${{ github.event.inputs.DEVICE_TREE }}" ]        && { echo "::error::DEVICE_TREE is required."; fail=1; }
+        [ -z "${{ github.event.inputs.DEVICE_TREE_BRANCH }}" ] && { echo "::error::DEVICE_TREE_BRANCH is required."; fail=1; }
+        [ -z "${{ github.event.inputs.DEVICE_PATH }}" ]        && { echo "::error::DEVICE_PATH is required."; fail=1; }
+        [ -z "${{ github.event.inputs.DEVICE_NAME }}" ]        && { echo "::error::DEVICE_NAME is required."; fail=1; }
+        if [ "$fail" -ne 0 ]; then
+          exit 1
+        fi
+        echo "All required inputs are set."
 
     - name: Display Inputs
       run: |
